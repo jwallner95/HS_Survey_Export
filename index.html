@@ -1,1 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Survey123 Export Tool</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <!-- SheetJS (Excel) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"
+          integrity="sha512-DwHy44zZJvs5rG30w+jfTyf6R6Gq2nBGV7OKd0h5BETNBxIjYnfLQbKu+u+2kR5mXkO9nqDnAb9p6IMdB9p0rA=="
+          crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+
+  <!-- jsPDF (PDF) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"
+          integrity="sha512-/uM3Inw0H3iYHnlnn6fnX5Mmj7VVT1+9LqDyqGEMyG2P3WqL5+G8I5A4hZ5K4hB3Y1HrETn9JQXfLHB2qDzF0w=="
+          crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 1.5rem;
+    }
+    h1 {
+      font-size: 1.4rem;
+      margin-bottom: 0.5rem;
+    }
+    .card {
+      border: 1px solid #ddd;
+      border-radius: 0.75rem;
+      padding: 1rem 1.25rem;
+      max-width: 900px;
+    }
+    .status {
+      margin: 0.5rem 0 1rem;
+      font-size: 0.9rem;
+      color: #555;
+    }
+    .field-list {
+      max-height: 250px;
+      overflow-y: auto;
+      border: 1px solid #eee;
+      border-radius: 0.5rem;
+      padding: 0.5rem 0.75rem;
+      margin-bottom: 1rem;
+    }
+    .field-list label {
+      display: block;
+      font-size: 0.9rem;
+      margin-bottom: 0.25rem;
+    }
+    .buttons {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-top: 0.5rem;
+    }
+    button {
+      border-radius: 999px;
+      padding: 0.4rem 0.9rem;
+      border: 1px solid #ccc;
+      background: #f5f5f5;
+      cursor: pointer;
+      font-size: 0.9rem;
+    }
+    button.primary {
+      background: #007ac2;
+      border-color: #007ac2;
+      color: white;
+    }
+    button:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+    .small {
+      font-size: 0.8rem;
+      color: #777;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Survey123 Data Export</h1>
+    <div class="status" id="status">Initialising…</div>
+
+    <div id="auth-section">
+      <button id="signin-btn" class="primary">Sign in with ArcGIS Online</button>
+      <p class="small">You’ll be redirected to ArcGIS Online to sign in, then returned here.</p>
+    </div>
+
+    <div id="export-section" style="display:none;">
+      <p><strong>Select fields to include in the export:</strong></p>
+      <div class="field-list" id="field-list"></div>
+
+      <div class="buttons">
+        <button id="select-all-btn">Select all</button>
+        <button id="clear-all-btn">Clear all</button>
+      </div>
+
+      <div class="buttons">
+        <button id="export-excel-btn" class="primary">Export to Excel (.xlsx)</button>
+        <button id="export-pdf-btn">Export to PDF</button>
+      </div>
+
+      <p class="small" style="margin-top:0.75rem;">
+        Exports are generated in your browser using your current ArcGIS Online permissions.
+      </p>
+    </div>
+  </div>
+
+  <script>
+    // ------------------- CONFIG -------------------
+    const CONFIG = {
+      portalUrl: "https://cwa-scotland.maps.arcgis.com/",   // or yourorg.maps.arcgis.com
+      clientId:  "x6jTMM7Vlfm0gIUP",      // OAuth app Client ID from AGOL
+      redirectUri: window.location.origin + window.location.pathname,
+
+      // PASTE YOUR SURVEY LAYER URL HERE
+      featureLayerUrl: "https://services-eu1.arcgis.com/bSzjBBo9coEnBAyV/arcgis/rest/services/service_39d7614810094160acf4dd46d553e37c/FeatureServer",
+
+      maxRecordCountForExport: 5000,
+
+      // Whitelist of fields the user can pick from:
+      // 'name' must match the field name in the layer.
+      // 'alias' is optional (nice label); falls back to layer alias if omitted.
+      allowedFields: [
+        { name: "PullUsername", alias: "Username:" },
+        { name: "InspectionDate",       alias: "Date:" },
+        { name: "Auditor",       alias: "Auditor: },
+        { name: "ProjectName",         alias: "Project Name:" },
+        { name: "Autocode",       alias: "Autocode:" }
+        // Add/remove as needed
+      ]
+    };
+    // ------------------------------------------------
+
+    let accessToken = null;
+    let username = null;
+    let layerFields = [];        // all fields from layer metadata
+    let allowedFieldDefs = [];   // allowedFields joined with metadata
+
+    const statusEl      = document.getElementById("status");
+    const authSection   = document.getElementById("auth-section");
+    const exportSection = document.getElementById("export-section");
+    const fieldListEl   = document.getElementById("field-list");
+
+    const signinBtn       = document.getElementById("signin-btn");
+    const selectAllBtn    = document.getElementById("select-all-btn");
+    const clearAllBtn     = document.getElementById("clear-all-btn");
+    const exportExcelBtn  = document.getElementById("export-excel-btn");
+    const exportPdfBtn    = document.getElementById("export-pdf-btn");
+
+    // ---------- OAUTH HELPERS ----------
+
+    function getTokenFromHash() {
+      if (!window.location.hash) return null;
+      const hash = window.location.hash.substring(1);
+      const params = new URLSearchParams(hash);
+      const token = params.get("access_token");
+      const user = params.get("username"); // optional; sometimes present
+      if (token) {
+        history.replaceState(null, "", window.location.pathname + window.location.search);
+        return { token, user };
+      }
+      return null;
+    }
+
+    function startOAuth() {
+      const authUrl = `${CONFIG.portalUrl}/sharing/rest/oauth2/authorize` +
+        `?client_id=${encodeURIComponent(CONFIG.clientId)}` +
+        `&response_type=token` +
+        `&redirect_uri=${encodeURIComponent(CONFIG.redirectUri)}` +
+        `&expiration=120` +
+        `&state=survey_export`;
+      window.location.href = authUrl;
+    }
+
+    async function getUserInfo() {
+      const url = `${CONFIG.portalUrl}/sharing/rest/community/self?f=json&token=${encodeURIComponent(accessToken)}`;
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error("Failed to get user info");
+      const data = await resp.json();
+      if (data.error) throw new Error(data.error.message || "Error fetching user info");
+      return data;
+    }
+
+    // ---------- FEATURE LAYER HELPERS ----------
+
+    async function fetchLayerMetadata() {
+      const url = `${CONFIG.featureLayerUrl}?f=json&token=${encodeURIComponent(accessToken)}`;
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error("Failed to load layer metadata");
+      const data = await resp.json();
+      if (data.error) throw new Error(data.error.message || "Layer metadata error");
+      return data;
+    }
+
+    function buildAllowedFieldDefs() {
+      const byName = Object.fromEntries((layerFields || []).map(f => [f.name, f]));
+      allowedFieldDefs = [];
+
+      const missing = [];
+
+      CONFIG.allowedFields.forEach(cfgFld => {
+        const lf = byName[cfgFld.name];
+        if (!lf) {
+          missing.push(cfgFld.name);
+          return;
+        }
+        allowedFieldDefs.push({
+          name:  cfgFld.name,
+          alias: cfgFld.alias || lf.alias || lf.name
+        });
+      });
+
+      if (missing.length) {
+        console.warn("The following allowedFields were not found in the layer:", missing);
+        statusEl.textContent += ` (Warning: ${missing.length} configured fields not found in layer.)`;
+      }
+    }
+
+    function renderFieldCheckboxes() {
+      fieldListEl.innerHTML = "";
+      if (!allowedFieldDefs.length) {
+        fieldListEl.textContent = "No configured fields available. Check CONFIG.allowedFields.";
+        return;
+      }
+
+      allowedFieldDefs.forEach(field => {
+        const id = `fld_${field.name}`;
+        const label = document.createElement("label");
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.id = id;
+        cb.value = field.name;
+        cb.checked = true;
+        label.appendChild(cb);
+        label.appendChild(document.createTextNode(` ${field.alias} (${field.name})`));
+        fieldListEl.appendChild(label);
+      });
+    }
+
+    function getSelectedFieldNames() {
+      const cbs = fieldListEl.querySelectorAll("input[type=checkbox]");
+      const selected = [];
+      cbs.forEach(cb => {
+        if (cb.checked) selected.push(cb.value);
+      });
+      return selected;
+    }
+
+    async function queryFeatures(selectedFields) {
+      statusEl.textContent = "Querying survey data…";
+
+      const url = `${CONFIG.featureLayerUrl}/query`;
+      const params = new URLSearchParams({
+        f: "json",
+        where: "1=1",
+        outFields: selectedFields.join(","),
+        returnGeometry: "false",
+        token: accessToken,
+        resultOffset: "0",
+        resultRecordCount: String(CONFIG.maxRecordCountForExport)
+      });
+
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: params
+      });
+
+      if (!resp.ok) throw new Error("Query request failed");
+      const data = await resp.json();
+      if (data.error) throw new Error(data.error.message || "Query error");
+
+      const features = data.features || [];
+      statusEl.textContent = `Retrieved ${features.length} records.`;
+      const rows = features.map(f => f.attributes || {});
+      return rows;
+    }
+
+    // ---------- EXPORTERS ----------
+
+    function exportToExcel(rows, selectedFields) {
+      const sheetData = [];
+
+      const allowedByName = Object.fromEntries(allowedFieldDefs.map(f => [f.name, f]));
+      const header = selectedFields.map(name => (allowedByName[name]?.alias || name));
+      sheetData.push(header);
+
+      rows.forEach(row => {
+        const rowArr = selectedFields.map(name => row[name]);
+        sheetData.push(rowArr);
+      });
+
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.aoa_to_sheet(sheetData);
+      XLSX.utils.book_append_sheet(wb, ws, "SurveyExport");
+
+      const filename = `SurveyExport_${new Date().toISOString().slice(0,10)}.xlsx`;
+      XLSX.writeFile(wb, filename);
+    }
+
+    async function exportToPdf(rows, selectedFields) {
+      const { jsPDF } = window.jspdf;
+      const doc = new jsPDF({ orientation: "landscape" });
+
+      const allowedByName = Object.fromEntries(allowedFieldDefs.map(f => [f.name, f]));
+      const header = selectedFields.map(name => (allowedByName[name]?.alias || name));
+
+      let y = 10;
+      doc.setFontSize(12);
+      doc.text("Survey123 Export", 10, y);
+      y += 6;
+      doc.setFontSize(9);
+
+      const colWidth = Math.max(30, (275 - 20) / selectedFields.length);
+
+      // Header row
+      let x = 10;
+      header.forEach(h => {
+        doc.text(String(h).substring(0, 25), x, y);
+        x += colWidth;
+      });
+      y += 5;
+
+      const maxRowsPerPage = 25;
+      let rowCountOnPage = 0;
+
+      rows.forEach(row => {
+        if (rowCountOnPage >= maxRowsPerPage) {
+          doc.addPage();
+          y = 10;
+          rowCountOnPage = 0;
+        }
+
+        x = 10;
+        selectedFields.forEach(name => {
+          let val = row[name];
+          if (val === null || typeof val === "undefined") val = "";
+          doc.text(String(val).substring(0, 25), x, y);
+          x += colWidth;
+        });
+
+        y += 5;
+        rowCountOnPage++;
+      });
+
+      const filename = `SurveyExport_${new Date().toISOString().slice(0,10)}.pdf`;
+      doc.save(filename);
+    }
+
+    // ---------- UI EVENT HANDLERS ----------
+
+    signinBtn.addEventListener("click", () => {
+      startOAuth();
+    });
+
+    selectAllBtn.addEventListener("click", () => {
+      fieldListEl.querySelectorAll("input[type=checkbox]").forEach(cb => cb.checked = true);
+    });
+
+    clearAllBtn.addEventListener("click", () => {
+      fieldListEl.querySelectorAll("input[type=checkbox]").forEach(cb => cb.checked = false);
+    });
+
+    exportExcelBtn.addEventListener("click", async () => {
+      try {
+        const selected = getSelectedFieldNames();
+        if (!selected.length) {
+          alert("Please select at least one field.");
+          return;
+        }
+        exportExcelBtn.disabled = true;
+        exportPdfBtn.disabled = true;
+        const rows = await queryFeatures(selected);
+        exportToExcel(rows, selected);
+      } catch (err) {
+        console.error(err);
+        alert("Error exporting to Excel: " + err.message);
+      } finally {
+        exportExcelBtn.disabled = false;
+        exportPdfBtn.disabled = false;
+      }
+    });
+
+    exportPdfBtn.addEventListener("click", async () => {
+      try {
+        const selected = getSelectedFieldNames();
+        if (!selected.length) {
+          alert("Please select at least one field.");
+          return;
+        }
+        exportExcelBtn.disabled = true;
+        exportPdfBtn.disabled = true;
+        const rows = await queryFeatures(selected);
+        await exportToPdf(rows, selected);
+      } catch (err) {
+        console.error(err);
+        alert("Error exporting to PDF: " + err.message);
+      } finally {
+        exportExcelBtn.disabled = false;
+        exportPdfBtn.disabled = false;
+      }
+    });
+
+    // ---------- INIT ----------
+
+    async function init() {
+      statusEl.textContent = "Checking for existing sign-in…";
+
+      const tokenInfo = getTokenFromHash();
+      if (tokenInfo) {
+        accessToken = tokenInfo.token;
+        username = tokenInfo.user;
+      }
+
+      if (!accessToken) {
+        statusEl.textContent = "Not signed in.";
+        authSection.style.display = "block";
+        exportSection.style.display = "none";
+        return;
+      }
+
+      try {
+        const user = await getUserInfo();
+        username = user.username;
+        statusEl.textContent = `Signed in as ${username}. Loading survey fields…`;
+
+        const layer = await fetchLayerMetadata();
+        layerFields = layer.fields || [];
+        buildAllowedFieldDefs();
+        renderFieldCheckboxes();
+
+        authSection.style.display = "none";
+        exportSection.style.display = "block";
+        statusEl.textContent = `Signed in as ${username}. Ready to export.`;
+      } catch (err) {
+        console.error(err);
+        statusEl.textContent = "Error initialising: " + err.message;
+        authSection.style.display = "block";
+        exportSection.style.display = "none";
+      }
+    }
+
+    init();
+  </script>
+</body>
+</html>
 
