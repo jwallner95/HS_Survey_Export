@@ -103,34 +103,33 @@
     </div>
   </div>
 
-  <script>
+    <script>
     // ------------------- CONFIG -------------------
     const CONFIG = {
-      portalUrl: "https://cwa-scotland.maps.arcgis.com/",   // or yourorg.maps.arcgis.com
-      clientId:  "x6jTMM7Vlfm0gIUP",      // OAuth app Client ID from AGOL
+      portalUrl: "https://cwa-scotland.maps.arcgis.com/",   // or your-org.maps.arcgis.com
+      clientId:  "x6jTMM7Vlfm0gIUP",      // paste your real client ID here
+
+      // IMPORTANT: this must match the URL you actually use to access the page,
+      // and it must be in the AGOL OAuth app's redirect URI list.
       redirectUri: "https://jwallner95.github.io/HS_Survey_Export/",
 
-      // PASTE YOUR SURVEY LAYER URL HERE
-      featureLayerUrl: "https://services-eu1.arcgis.com/bSzjBBo9coEnBAyV/arcgis/rest/services/service_39d7614810094160acf4dd46d553e37c/FeatureServer",
+      // Your Survey123 feature layer (0 = main layer)
+      featureLayerUrl: "https://services-eu1.arcgis.com/bSzjBBo9coEnBAyV/arcgis/rest/services/service_39d7614810094160acf4dd46d553e37c/FeatureServer/0",
 
       maxRecordCountForExport: 5000,
 
-     
+      // Whitelist of fields user can choose from
       allowedFields: [
-        { name: "PullUsername", alias: "Username:" },
-        { name: "InspectionDate",       alias: "Date:" },
-        { name: "Auditor",       alias: "Auditor: },
-        { name: "ProjectName",         alias: "Project Name:" },
-        { name: "Autocode",       alias: "Autocode:" }
-        // Add/remove as needed
+        { name: "OBJECTID", alias: "OBJECTID" }
+        // add your real fields here later
       ]
     };
     // ------------------------------------------------
 
     let accessToken = null;
     let username = null;
-    let layerFields = [];        // all fields from layer metadata
-    let allowedFieldDefs = [];   // allowedFields joined with metadata
+    let layerFields = [];
+    let allowedFieldDefs = [];
 
     const statusEl      = document.getElementById("status");
     const authSection   = document.getElementById("auth-section");
@@ -150,7 +149,7 @@
       const hash = window.location.hash.substring(1);
       const params = new URLSearchParams(hash);
       const token = params.get("access_token");
-      const user = params.get("username"); // optional; sometimes present
+      const user = params.get("username");
       if (token) {
         history.replaceState(null, "", window.location.pathname + window.location.search);
         return { token, user };
@@ -159,17 +158,20 @@
     }
 
     function startOAuth() {
-      const authUrl = `${CONFIG.portalUrl}/sharing/rest/oauth2/authorize` +
-        `?client_id=${encodeURIComponent(CONFIG.clientId)}` +
-        `&response_type=token` +
-        `&redirect_uri=${encodeURIComponent(CONFIG.redirectUri)}` +
-        `&expiration=120` +
-        `&state=survey_export`;
+      const authUrl = CONFIG.portalUrl
+        + "/sharing/rest/oauth2/authorize"
+        + "?client_id=" + encodeURIComponent(CONFIG.clientId)
+        + "&response_type=token"
+        + "&redirect_uri=" + encodeURIComponent(CONFIG.redirectUri)
+        + "&expiration=120"
+        + "&state=survey_export";
       window.location.href = authUrl;
     }
 
     async function getUserInfo() {
-      const url = `${CONFIG.portalUrl}/sharing/rest/community/self?f=json&token=${encodeURIComponent(accessToken)}`;
+      const url = CONFIG.portalUrl
+        + "/sharing/rest/community/self?f=json&token="
+        + encodeURIComponent(accessToken);
       const resp = await fetch(url);
       if (!resp.ok) throw new Error("Failed to get user info");
       const data = await resp.json();
@@ -180,7 +182,8 @@
     // ---------- FEATURE LAYER HELPERS ----------
 
     async function fetchLayerMetadata() {
-      const url = `${CONFIG.featureLayerUrl}?f=json&token=${encodeURIComponent(accessToken)}`;
+      const url = CONFIG.featureLayerUrl
+        + "?f=json&token=" + encodeURIComponent(accessToken);
       const resp = await fetch(url);
       if (!resp.ok) throw new Error("Failed to load layer metadata");
       const data = await resp.json();
@@ -191,7 +194,6 @@
     function buildAllowedFieldDefs() {
       const byName = Object.fromEntries((layerFields || []).map(f => [f.name, f]));
       allowedFieldDefs = [];
-
       const missing = [];
 
       CONFIG.allowedFields.forEach(cfgFld => {
@@ -207,8 +209,8 @@
       });
 
       if (missing.length) {
-        console.warn("The following allowedFields were not found in the layer:", missing);
-        statusEl.textContent += ` (Warning: ${missing.length} configured fields not found in layer.)`;
+        console.warn("Configured fields not found in layer:", missing);
+        statusEl.textContent += " (Warning: some configured fields not found in layer.)";
       }
     }
 
@@ -218,9 +220,8 @@
         fieldListEl.textContent = "No configured fields available. Check CONFIG.allowedFields.";
         return;
       }
-
       allowedFieldDefs.forEach(field => {
-        const id = `fld_${field.name}`;
+        const id = "fld_" + field.name;
         const label = document.createElement("label");
         const cb = document.createElement("input");
         cb.type = "checkbox";
@@ -228,7 +229,7 @@
         cb.value = field.name;
         cb.checked = true;
         label.appendChild(cb);
-        label.appendChild(document.createTextNode(` ${field.alias} (${field.name})`));
+        label.appendChild(document.createTextNode(" " + field.alias + " (" + field.name + ")"));
         fieldListEl.appendChild(label);
       });
     }
@@ -245,7 +246,7 @@
     async function queryFeatures(selectedFields) {
       statusEl.textContent = "Querying survey data…";
 
-      const url = `${CONFIG.featureLayerUrl}/query`;
+      const url = CONFIG.featureLayerUrl + "/query";
       const params = new URLSearchParams({
         f: "json",
         where: "1=1",
@@ -267,16 +268,14 @@
       if (data.error) throw new Error(data.error.message || "Query error");
 
       const features = data.features || [];
-      statusEl.textContent = `Retrieved ${features.length} records.`;
-      const rows = features.map(f => f.attributes || {});
-      return rows;
+      statusEl.textContent = "Retrieved " + features.length + " records.";
+      return features.map(f => f.attributes || {});
     }
 
     // ---------- EXPORTERS ----------
 
     function exportToExcel(rows, selectedFields) {
       const sheetData = [];
-
       const allowedByName = Object.fromEntries(allowedFieldDefs.map(f => [f.name, f]));
       const header = selectedFields.map(name => (allowedByName[name]?.alias || name));
       sheetData.push(header);
@@ -290,7 +289,7 @@
       const ws = XLSX.utils.aoa_to_sheet(sheetData);
       XLSX.utils.book_append_sheet(wb, ws, "SurveyExport");
 
-      const filename = `SurveyExport_${new Date().toISOString().slice(0,10)}.xlsx`;
+      const filename = "SurveyExport_" + new Date().toISOString().slice(0,10) + ".xlsx";
       XLSX.writeFile(wb, filename);
     }
 
@@ -309,7 +308,6 @@
 
       const colWidth = Math.max(30, (275 - 20) / selectedFields.length);
 
-      // Header row
       let x = 10;
       header.forEach(h => {
         doc.text(String(h).substring(0, 25), x, y);
@@ -326,7 +324,6 @@
           y = 10;
           rowCountOnPage = 0;
         }
-
         x = 10;
         selectedFields.forEach(name => {
           let val = row[name];
@@ -334,12 +331,11 @@
           doc.text(String(val).substring(0, 25), x, y);
           x += colWidth;
         });
-
         y += 5;
         rowCountOnPage++;
       });
 
-      const filename = `SurveyExport_${new Date().toISOString().slice(0,10)}.pdf`;
+      const filename = "SurveyExport_" + new Date().toISOString().slice(0,10) + ".pdf";
       doc.save(filename);
     }
 
@@ -418,7 +414,7 @@
       try {
         const user = await getUserInfo();
         username = user.username;
-        statusEl.textContent = `Signed in as ${username}. Loading survey fields…`;
+        statusEl.textContent = "Signed in as " + username + ". Loading survey fields…";
 
         const layer = await fetchLayerMetadata();
         layerFields = layer.fields || [];
@@ -427,7 +423,7 @@
 
         authSection.style.display = "none";
         exportSection.style.display = "block";
-        statusEl.textContent = `Signed in as ${username}. Ready to export.`;
+        statusEl.textContent = "Signed in as " + username + ". Ready to export.";
       } catch (err) {
         console.error(err);
         statusEl.textContent = "Error initialising: " + err.message;
@@ -438,6 +434,3 @@
 
     init();
   </script>
-</body>
-</html>
-
