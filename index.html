@@ -122,14 +122,12 @@
 
       maxRecordCountForExport: 5000,
 
-      // Whitelist of fields user can choose from
-      allowedFields: [
-        { name: "PullUsername", alias: "PullUsername" }
-        // add your real fields here later
-      ]
+ // Single attribute field to filter by (dropdown)
+      filterField: {
+        name:  "Autocode",          // <-- EXACT field name from REST (e.g. 'Status', 'SiteCode', etc.)
+        alias: "Autocode"           // label shown in UI
+      }
     };
-    // ------------------------------------------------
-
     let accessToken = null;
     let username = null;
 
