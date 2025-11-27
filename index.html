@@ -78,32 +78,36 @@
     <h1>Survey123 Data Export</h1>
     <div class="status" id="status">Initialising…</div>
 
+    <!-- Sign-in section -->
     <div id="auth-section">
       <button id="signin-btn" class="primary">Sign in with ArcGIS Online</button>
       <p class="small">You’ll be redirected to ArcGIS Online to sign in, then returned here.</p>
     </div>
 
+    <!-- Export section -->
     <div id="export-section" style="display:none;">
-      <p><strong>Select fields to include in the export:</strong></p>
-      <div class="field-list" id="field-list"></div>
+      <p><strong>Filter records to export:</strong></p>
 
-      <div class="buttons">
-        <button id="select-all-btn">Select all</button>
-        <button id="clear-all-btn">Clear all</button>
-      </div>
+      <label class="small">
+        Filter by
+        <span id="filter-field-label">(loading…)</span>:
+        <select id="filter-select">
+          <option value="__ALL__">Loading…</option>
+        </select>
+      </label>
 
-      <div class="buttons">
+      <p class="small" style="margin-top:0.5rem;">
+        The export will include all non-system fields. Photo attachments will be included as URLs where available.
+      </p>
+
+      <div class="buttons" style="margin-top:0.75rem;">
         <button id="export-excel-btn" class="primary">Export to Excel (.xlsx)</button>
         <button id="export-pdf-btn">Export to PDF</button>
       </div>
-
-      <p class="small" style="margin-top:0.75rem;">
-        Exports are generated in your browser using your current ArcGIS Online permissions.
-      </p>
     </div>
   </div>
 
-    <script>
+  <script>
     // ------------------- CONFIG -------------------
     const CONFIG = {
       portalUrl: "https://cwa-scotland.maps.arcgis.com/",   // or your-org.maps.arcgis.com
@@ -128,19 +132,22 @@
 
     let accessToken = null;
     let username = null;
-    let layerFields = [];
-    let allowedFieldDefs = [];
+
+    let layerInfo = null;
+    let allExportFields = [];     // [{name, alias, isAttachment}]
+    let objectIdFieldName = null; // e.g. "OBJECTID"
+    let filterFieldType = null;   // to know if we need quotes in WHERE
 
     const statusEl      = document.getElementById("status");
     const authSection   = document.getElementById("auth-section");
     const exportSection = document.getElementById("export-section");
-    const fieldListEl   = document.getElementById("field-list");
 
-    const signinBtn       = document.getElementById("signin-btn");
-    const selectAllBtn    = document.getElementById("select-all-btn");
-    const clearAllBtn     = document.getElementById("clear-all-btn");
-    const exportExcelBtn  = document.getElementById("export-excel-btn");
-    const exportPdfBtn    = document.getElementById("export-pdf-btn");
+    const signinBtn     = document.getElementById("signin-btn");
+    const exportExcelBtn= document.getElementById("export-excel-btn");
+    const exportPdfBtn  = document.getElementById("export-pdf-btn");
+
+    const filterFieldLabelEl = document.getElementById("filter-field-label");
+    const filterSelectEl     = document.getElementById("filter-select");
 
     // ---------- OAUTH HELPERS ----------
 
@@ -191,66 +198,121 @@
       return data;
     }
 
-    function buildAllowedFieldDefs() {
-      const byName = Object.fromEntries((layerFields || []).map(f => [f.name, f]));
-      allowedFieldDefs = [];
-      const missing = [];
+    function buildFieldLists() {
+      const fields = layerInfo.fields || [];
+      const excludeNames = ["Shape", "SHAPE", "shape", "GlobalID", "globalid"];
+      const exportFields = [];
 
-      CONFIG.allowedFields.forEach(cfgFld => {
-        const lf = byName[cfgFld.name];
-        if (!lf) {
-          missing.push(cfgFld.name);
-          return;
-        }
-        allowedFieldDefs.push({
-          name:  cfgFld.name,
-          alias: cfgFld.alias || lf.alias || lf.name
+      // Identify OID field
+      objectIdFieldName = layerInfo.objectIdField
+        || (fields.find(f => f.type === "esriFieldTypeOID")?.name || "OBJECTID");
+
+      fields.forEach(f => {
+        if (f.type === "esriFieldTypeGeometry") return;
+        if (excludeNames.includes(f.name)) return;
+        // we still want OBJECTID, it's useful
+        exportFields.push({
+          name: f.name,
+          alias: f.alias || f.name,
+          isAttachment: false
         });
+
+        if (f.name === CONFIG.filterField.name) {
+          filterFieldType = f.type; // e.g. esriFieldTypeString
+        }
       });
 
-      if (missing.length) {
-        console.warn("Configured fields not found in layer:", missing);
-        statusEl.textContent += " (Warning: some configured fields not found in layer.)";
+      // Synthetic "PhotoURLs" column if attachments enabled
+      if (layerInfo.hasAttachments) {
+        exportFields.push({
+          name: "_PhotoURLs",
+          alias: "Photo URLs",
+          isAttachment: true
+        });
       }
+
+      allExportFields = exportFields;
     }
 
-    function renderFieldCheckboxes() {
-      fieldListEl.innerHTML = "";
-      if (!allowedFieldDefs.length) {
-        fieldListEl.textContent = "No configured fields available. Check CONFIG.allowedFields.";
-        return;
-      }
-      allowedFieldDefs.forEach(field => {
-        const id = "fld_" + field.name;
-        const label = document.createElement("label");
-        const cb = document.createElement("input");
-        cb.type = "checkbox";
-        cb.id = id;
-        cb.value = field.name;
-        cb.checked = true;
-        label.appendChild(cb);
-        label.appendChild(document.createTextNode(" " + field.alias + " (" + field.name + ")"));
-        fieldListEl.appendChild(label);
-      });
-    }
-
-    function getSelectedFieldNames() {
-      const cbs = fieldListEl.querySelectorAll("input[type=checkbox]");
-      const selected = [];
-      cbs.forEach(cb => {
-        if (cb.checked) selected.push(cb.value);
-      });
-      return selected;
-    }
-
-    async function queryFeatures(selectedFields) {
-      statusEl.textContent = "Querying survey data…";
+    async function fetchFilterOptions() {
+      statusEl.textContent = "Loading filter values…";
 
       const url = CONFIG.featureLayerUrl + "/query";
       const params = new URLSearchParams({
         f: "json",
         where: "1=1",
-        outFields: selectedFields.join(","),
+        outFields: CONFIG.filterField.name,
+        returnDistinctValues: "true",
+        returnGeometry: "false",
+        orderByFields: CONFIG.filterField.name,
+        token: accessToken
+      });
+
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: params
+      });
+
+      if (!resp.ok) throw new Error("Failed to load filter values");
+      const data = await resp.json();
+      if (data.error) throw new Error(data.error.message || "Filter values error");
+
+      const vals = (data.features || [])
+        .map(f => f.attributes?.[CONFIG.filterField.name])
+        .filter(v => v !== null && typeof v !== "undefined" && v !== "")
+        .filter((v, i, arr) => arr.indexOf(v) === i); // unique
+
+      // Populate dropdown
+      filterSelectEl.innerHTML = "";
+      const optAll = document.createElement("option");
+      optAll.value = "__ALL__";
+      optAll.textContent = "All values";
+      filterSelectEl.appendChild(optAll);
+
+      vals.forEach(v => {
+        const opt = document.createElement("option");
+        opt.value = String(v);
+        opt.textContent = String(v);
+        filterSelectEl.appendChild(opt);
+      });
+
+      filterFieldLabelEl.textContent = CONFIG.filterField.alias;
+      statusEl.textContent = "Signed in as " + username + ". Ready to export.";
+    }
+
+    function buildWhereClause() {
+      const val = filterSelectEl.value;
+      if (val === "__ALL__") return "1=1";
+
+      // Basic handling: quote strings/dates, no quotes for numbers
+      const isStringLike =
+        !filterFieldType || filterFieldType === "esriFieldTypeString" ||
+        filterFieldType === "esriFieldTypeDate";
+
+      if (isStringLike) {
+        const safe = val.replace(/'/g, "''");
+        return CONFIG.filterField.name + " = '" + safe + "'";
+      } else {
+        return CONFIG.filterField.name + " = " + val;
+      }
+    }
+
+    async function queryFeatures(whereClause) {
+      statusEl.textContent = "Querying survey data…";
+
+      // Always include ObjectID field in outFields
+      const nonAttachmentFields = allExportFields.filter(f => !f.isAttachment);
+      const outFieldNames = nonAttachmentFields.map(f => f.name);
+      if (!outFieldNames.includes(objectIdFieldName)) {
+        outFieldNames.push(objectIdFieldName);
+      }
+
+      const url = CONFIG.featureLayerUrl + "/query";
+      const params = new URLSearchParams({
+        f: "json",
+        where: whereClause,
+        outFields: outFieldNames.join(","),
         returnGeometry: "false",
         token: accessToken,
         resultOffset: "0",
@@ -272,16 +334,72 @@
       return features.map(f => f.attributes || {});
     }
 
+    async function fetchAttachments(objectIds) {
+      const result = {};
+      if (!layerInfo.hasAttachments || !objectIds.length) return result;
+
+      statusEl.textContent = "Fetching photo attachments…";
+
+      const url = CONFIG.featureLayerUrl + "/queryAttachments";
+      const params = new URLSearchParams({
+        f: "json",
+        objectIds: objectIds.join(","),
+        returnUrl: "true",
+        token: accessToken
+      });
+
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: params
+      });
+
+      if (!resp.ok) {
+        console.warn("Attachments request failed");
+        return result;
+      }
+
+      const data = await resp.json();
+      if (data.error) {
+        console.warn("Attachments error:", data.error);
+        return result;
+      }
+
+      (data.attachmentGroups || []).forEach(g => {
+        const pid = g.parentObjectId;
+        const infos = g.attachmentInfos || [];
+        result[pid] = infos.map(a => {
+          // Some services return 'url', some require building it
+          if (a.url) return a.url;
+          const base = CONFIG.featureLayerUrl.replace(/\/0$/, "");
+          return base + "/0/" + pid + "/attachments/" + a.id;
+        });
+      });
+
+      return result;
+    }
+
     // ---------- EXPORTERS ----------
 
-    function exportToExcel(rows, selectedFields) {
+    function buildExportRowsWithAttachments(rows, attachmentsMap) {
+      return rows.map(row => {
+        const r = { ...row };
+        if (layerInfo.hasAttachments) {
+          const oidVal = row[objectIdFieldName];
+          const urls = attachmentsMap[oidVal] || [];
+          r["_PhotoURLs"] = urls.join("; ");
+        }
+        return r;
+      });
+    }
+
+    function exportToExcel(rowsWithAttach) {
       const sheetData = [];
-      const allowedByName = Object.fromEntries(allowedFieldDefs.map(f => [f.name, f]));
-      const header = selectedFields.map(name => (allowedByName[name]?.alias || name));
+      const header = allExportFields.map(f => f.alias);
       sheetData.push(header);
 
-      rows.forEach(row => {
-        const rowArr = selectedFields.map(name => row[name]);
+      rowsWithAttach.forEach(row => {
+        const rowArr = allExportFields.map(f => row[f.name]);
         sheetData.push(rowArr);
       });
 
@@ -293,45 +411,55 @@
       XLSX.writeFile(wb, filename);
     }
 
-    async function exportToPdf(rows, selectedFields) {
+    async function exportToPdf(rowsWithAttach) {
       const { jsPDF } = window.jspdf;
       const doc = new jsPDF({ orientation: "landscape" });
 
-      const allowedByName = Object.fromEntries(allowedFieldDefs.map(f => [f.name, f]));
-      const header = selectedFields.map(name => (allowedByName[name]?.alias || name));
+      const header = allExportFields.map(f => f.alias);
 
       let y = 10;
       doc.setFontSize(12);
       doc.text("Survey123 Export", 10, y);
       y += 6;
-      doc.setFontSize(9);
+      doc.setFontSize(8);
 
-      const colWidth = Math.max(30, (275 - 20) / selectedFields.length);
+      const colWidth = Math.max(25, (275 - 20) / allExportFields.length);
 
+      // Header row
       let x = 10;
       header.forEach(h => {
-        doc.text(String(h).substring(0, 25), x, y);
+        doc.text(String(h).substring(0, 20), x, y);
         x += colWidth;
       });
-      y += 5;
+      y += 4;
 
       const maxRowsPerPage = 25;
       let rowCountOnPage = 0;
 
-      rows.forEach(row => {
+      rowsWithAttach.forEach(row => {
         if (rowCountOnPage >= maxRowsPerPage) {
           doc.addPage();
           y = 10;
           rowCountOnPage = 0;
+
+          // redraw header on new page
+          x = 10;
+          header.forEach(h => {
+            doc.text(String(h).substring(0, 20), x, y);
+            x += colWidth;
+          });
+          y += 4;
         }
+
         x = 10;
-        selectedFields.forEach(name => {
-          let val = row[name];
+        allExportFields.forEach(f => {
+          let val = row[f.name];
           if (val === null || typeof val === "undefined") val = "";
-          doc.text(String(val).substring(0, 25), x, y);
+          doc.text(String(val).substring(0, 20), x, y);
           x += colWidth;
         });
-        y += 5;
+
+        y += 4;
         rowCountOnPage++;
       });
 
@@ -345,25 +473,17 @@
       startOAuth();
     });
 
-    selectAllBtn.addEventListener("click", () => {
-      fieldListEl.querySelectorAll("input[type=checkbox]").forEach(cb => cb.checked = true);
-    });
-
-    clearAllBtn.addEventListener("click", () => {
-      fieldListEl.querySelectorAll("input[type=checkbox]").forEach(cb => cb.checked = false);
-    });
-
     exportExcelBtn.addEventListener("click", async () => {
       try {
-        const selected = getSelectedFieldNames();
-        if (!selected.length) {
-          alert("Please select at least one field.");
-          return;
-        }
         exportExcelBtn.disabled = true;
         exportPdfBtn.disabled = true;
-        const rows = await queryFeatures(selected);
-        exportToExcel(rows, selected);
+
+        const where = buildWhereClause();
+        const rows = await queryFeatures(where);
+        const objectIds = rows.map(r => r[objectIdFieldName]).filter(v => v !== null && typeof v !== "undefined");
+        const attachmentsMap = await fetchAttachments(objectIds);
+        const rowsWithAttach = buildExportRowsWithAttachments(rows, attachmentsMap);
+        exportToExcel(rowsWithAttach);
       } catch (err) {
         console.error(err);
         alert("Error exporting to Excel: " + err.message);
@@ -375,15 +495,15 @@
 
     exportPdfBtn.addEventListener("click", async () => {
       try {
-        const selected = getSelectedFieldNames();
-        if (!selected.length) {
-          alert("Please select at least one field.");
-          return;
-        }
         exportExcelBtn.disabled = true;
         exportPdfBtn.disabled = true;
-        const rows = await queryFeatures(selected);
-        await exportToPdf(rows, selected);
+
+        const where = buildWhereClause();
+        const rows = await queryFeatures(where);
+        const objectIds = rows.map(r => r[objectIdFieldName]).filter(v => v !== null && typeof v !== "undefined");
+        const attachmentsMap = await fetchAttachments(objectIds);
+        const rowsWithAttach = buildExportRowsWithAttachments(rows, attachmentsMap);
+        await exportToPdf(rowsWithAttach);
       } catch (err) {
         console.error(err);
         alert("Error exporting to PDF: " + err.message);
@@ -414,16 +534,14 @@
       try {
         const user = await getUserInfo();
         username = user.username;
-        statusEl.textContent = "Signed in as " + username + ". Loading survey fields…";
+        statusEl.textContent = "Signed in as " + username + ". Loading layer metadata…";
 
-        const layer = await fetchLayerMetadata();
-        layerFields = layer.fields || [];
-        buildAllowedFieldDefs();
-        renderFieldCheckboxes();
+        layerInfo = await fetchLayerMetadata();
+        buildFieldLists();
+        await fetchFilterOptions();
 
         authSection.style.display = "none";
         exportSection.style.display = "block";
-        statusEl.textContent = "Signed in as " + username + ". Ready to export.";
       } catch (err) {
         console.error(err);
         statusEl.textContent = "Error initialising: " + err.message;
