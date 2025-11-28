@@ -410,60 +410,85 @@
     }
 
     async function exportToPdf(rowsWithAttach) {
-      const { jsPDF } = window.jspdf;
-      const doc = new jsPDF({ orientation: "landscape" });
+  const { jsPDF } = window.jspdf;
+  // Portrait A4-ish
+  const doc = new jsPDF({ orientation: "portrait" });
 
-      const header = allExportFields.map(f => f.alias);
+  const leftMargin = 15;
+  const topMargin = 15;
+  const maxWidth = 180;  // usable text width
+  const lineHeight = 5;
 
-      let y = 10;
-      doc.setFontSize(12);
-      doc.text("Survey123 Export", 10, y);
-      y += 6;
-      doc.setFontSize(8);
-
-      const colWidth = Math.max(25, (275 - 20) / allExportFields.length);
-
-      // Header row
-      let x = 10;
-      header.forEach(h => {
-        doc.text(String(h).substring(0, 20), x, y);
-        x += colWidth;
-      });
-      y += 4;
-
-      const maxRowsPerPage = 25;
-      let rowCountOnPage = 0;
-
-      rowsWithAttach.forEach(row => {
-        if (rowCountOnPage >= maxRowsPerPage) {
-          doc.addPage();
-          y = 10;
-          rowCountOnPage = 0;
-
-          // redraw header on new page
-          x = 10;
-          header.forEach(h => {
-            doc.text(String(h).substring(0, 20), x, y);
-            x += colWidth;
-          });
-          y += 4;
-        }
-
-        x = 10;
-        allExportFields.forEach(f => {
-          let val = row[f.name];
-          if (val === null || typeof val === "undefined") val = "";
-          doc.text(String(val).substring(0, 20), x, y);
-          x += colWidth;
-        });
-
-        y += 4;
-        rowCountOnPage++;
-      });
-
-      const filename = "SurveyExport_" + new Date().toISOString().slice(0,10) + ".pdf";
-      doc.save(filename);
+  rowsWithAttach.forEach((row, idx) => {
+    // New page for every record except the first
+    if (idx > 0) {
+      doc.addPage();
     }
+
+    let y = topMargin;
+
+    // Header
+    doc.setFontSize(12);
+    doc.text("Survey123 Record " + (idx + 1), leftMargin, y);
+    y += lineHeight + 2;
+
+    doc.setFontSize(9);
+
+    // 1) Normal (non-attachment) fields, only if not null/empty
+    const nonAttachmentFields = allExportFields.filter(f => !f.isAttachment);
+    nonAttachmentFields.forEach(field => {
+      const raw = row[field.name];
+      if (raw === null || typeof raw === "undefined") {
+        return; // skip nulls
+      }
+      const valueStr = String(raw).trim();
+      if (!valueStr) {
+        return; // skip empty strings
+      }
+
+      const label = field.alias || field.name;
+      const lineText = label + ": " + valueStr;
+
+      // Wrap long text
+      const wrapped = doc.splitTextToSize(lineText, maxWidth);
+      wrapped.forEach(line => {
+        if (y > 285) {
+          // add a page and continue same record
+          doc.addPage();
+          y = topMargin;
+        }
+        doc.text(line, leftMargin, y);
+        y += lineHeight;
+      });
+
+      // extra spacing between fields
+      y += 1;
+    });
+
+    // 2) Attachment URLs, if we have the synthetic Photo URLs field
+    const photoField = allExportFields.find(f => f.isAttachment);
+    if (photoField) {
+      const photoVal = row[photoField.name];
+      if (photoVal && String(photoVal).trim()) {
+        const label = photoField.alias || "Photo URLs";
+        const urlsText = label + ": " + String(photoVal);
+
+        const wrapped = doc.splitTextToSize(urlsText, maxWidth);
+        wrapped.forEach(line => {
+          if (y > 285) {
+            doc.addPage();
+            y = topMargin;
+          }
+          doc.text(line, leftMargin, y);
+          y += lineHeight;
+        });
+      }
+    }
+  });
+
+  const filename = "SurveyExport_" + new Date().toISOString().slice(0, 10) + ".pdf";
+  doc.save(filename);
+}
 
     // ---------- UI EVENT HANDLERS ----------
 
